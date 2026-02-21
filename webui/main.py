@@ -1,14 +1,13 @@
-"""NanoBot Web UI - Complete FastAPI + Single-Page App"""
+"""NanoBot Web UI - Enhanced FastAPI + Single-Page App"""
 import json
 import os
 import subprocess
 import threading
-import time
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import secrets
 import asyncio
@@ -22,19 +21,17 @@ LOG_FILE = NANOBOT_DIR / "nanobot.log"
 SKILLS_DIR = NANOBOT_DIR / "skills"
 MEMORY_FILE = NANOBOT_DIR / "memory.md"
 
-gateway_process: Optional[subprocess.Popen] = None
+gateway_process = None
 gateway_lock = threading.Lock()
-
 WEBUI_PASSWORD = os.environ.get("WEBUI_PASSWORD", "")
 
 
-def check_auth(credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+def check_auth(credentials=Depends(security)):
     if not WEBUI_PASSWORD:
         return True
     if credentials is None:
         raise HTTPException(status_code=401, headers={"WWW-Authenticate": "Basic"})
-    ok = secrets.compare_digest(credentials.password.encode(), WEBUI_PASSWORD.encode())
-    if not ok:
+    if not secrets.compare_digest(credentials.password.encode(), WEBUI_PASSWORD.encode()):
         raise HTTPException(status_code=401, headers={"WWW-Authenticate": "Basic"})
     return True
 
@@ -49,21 +46,18 @@ def start_gateway():
             log_f = open(LOG_FILE, "a")
             gateway_process = subprocess.Popen(
                 ["nanobot", "gateway"],
-                stdout=log_f,
-                stderr=subprocess.STDOUT,
+                stdout=log_f, stderr=subprocess.STDOUT,
                 cwd=str(NANOBOT_DIR),
             )
         except Exception as e:
             print(f"Failed to start gateway: {e}")
 
 
-def is_gateway_running() -> bool:
-    if gateway_process is None:
-        return False
-    return gateway_process.poll() is None
+def is_gateway_running():
+    return gateway_process is not None and gateway_process.poll() is None
 
 
-def read_config() -> dict:
+def read_config():
     NANOBOT_DIR.mkdir(parents=True, exist_ok=True)
     if CONFIG_FILE.exists():
         try:
@@ -73,21 +67,19 @@ def read_config() -> dict:
     return {}
 
 
-def write_config(data: dict):
+def write_config(data):
     NANOBOT_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
 
 
 @app.on_event("startup")
-async def startup_event():
+async def startup():
     start_gateway()
 
 
-# ── API endpoints ──────────────────────────────────────────────────────────────
-
 @app.get("/api/status")
 async def get_status(_=Depends(check_auth)):
-    return {"ok": True, "gateway_running": is_gateway_running(), "config_exists": CONFIG_FILE.exists()}
+    return {"ok": True, "gateway_running": is_gateway_running()}
 
 
 @app.get("/api/config")
@@ -97,767 +89,454 @@ async def get_config(_=Depends(check_auth)):
 
 @app.post("/api/config")
 async def save_config(request: Request, _=Depends(check_auth)):
-    try:
-        data = await request.json()
-        write_config(data)
-        return {"success": True}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    write_config(await request.json())
+    return {"ok": True}
 
 
-@app.post("/api/restart")
-async def restart_gateway(_=Depends(check_auth)):
+@app.post("/api/gateway/{action}")
+async def gateway_action(action: str, _=Depends(check_auth)):
     global gateway_process
-    with gateway_lock:
-        try:
-            if gateway_process and gateway_process.poll() is None:
+    if action == "stop" or action == "restart":
+        with gateway_lock:
+            if gateway_process:
                 gateway_process.terminate()
                 try:
                     gateway_process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     gateway_process.kill()
-            await asyncio.sleep(1)
-            start_gateway()
-            return {"success": True, "running": is_gateway_running()}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+                gateway_process = None
+    if action == "start" or action == "restart":
+        await asyncio.sleep(0.5)
+        start_gateway()
+        await asyncio.sleep(1)
+    return {"ok": True, "running": is_gateway_running()}
 
 
 @app.get("/api/logs")
-async def get_logs(lines: int = 200, _=Depends(check_auth)):
+async def get_logs(_=Depends(check_auth)):
     if not LOG_FILE.exists():
         return {"lines": []}
-    try:
-        with open(LOG_FILE, "r", errors="replace") as f:
-            all_lines = f.readlines()
-        return {"lines": all_lines[-lines:]}
-    except Exception as e:
-        return {"error": str(e), "lines": []}
+    return {"lines": LOG_FILE.read_text().split("\n")[-500:]}
 
 
-@app.post("/api/logs/clear")
+@app.delete("/api/logs")
 async def clear_logs(_=Depends(check_auth)):
-    try:
+    if LOG_FILE.exists():
         LOG_FILE.write_text("")
-        return {"success": True}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-@app.get("/api/skills")
-async def list_skills(_=Depends(check_auth)):
-    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    skills = []
-    for f in SKILLS_DIR.glob("*.md"):
-        skills.append({"name": f.stem, "filename": f.name, "size": f.stat().st_size})
-    return {"skills": skills}
-
-
-@app.get("/api/skills/{name}")
-async def get_skill(name: str, _=Depends(check_auth)):
-    f = SKILLS_DIR / f"{name}.md"
-    if not f.exists():
-        raise HTTPException(404, "Skill not found")
-    return {"name": name, "content": f.read_text()}
-
-
-@app.post("/api/skills/{name}")
-async def save_skill(name: str, request: Request, _=Depends(check_auth)):
-    try:
-        body = await request.json()
-        SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-        (SKILLS_DIR / f"{name}.md").write_text(body.get("content", ""))
-        return {"success": True}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-@app.delete("/api/skills/{name}")
-async def delete_skill(name: str, _=Depends(check_auth)):
-    f = SKILLS_DIR / f"{name}.md"
-    if f.exists():
-        f.unlink()
-    return {"success": True}
+    return {"ok": True}
 
 
 @app.get("/api/memory")
 async def get_memory(_=Depends(check_auth)):
-    if not MEMORY_FILE.exists():
-        return {"content": ""}
-    return {"content": MEMORY_FILE.read_text()}
+    return {"content": MEMORY_FILE.read_text() if MEMORY_FILE.exists() else ""}
 
 
 @app.post("/api/memory")
 async def save_memory(request: Request, _=Depends(check_auth)):
-    try:
-        body = await request.json()
-        NANOBOT_DIR.mkdir(parents=True, exist_ok=True)
-        MEMORY_FILE.write_text(body.get("content", ""))
-        return {"success": True}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    data = await request.json()
+    NANOBOT_DIR.mkdir(parents=True, exist_ok=True)
+    MEMORY_FILE.write_text(data.get("content", ""))
+    return {"ok": True}
 
 
-# ── HTML SPA ───────────────────────────────────────────────────────────────────
+@app.get("/api/skills")
+async def list_skills(_=Depends(check_auth)):
+    if not SKILLS_DIR.exists():
+        return {"skills": []}
+    return {"skills": [{"name": f.stem} for f in sorted(SKILLS_DIR.glob("*.md"))]}
 
-HTML = r"""<!DOCTYPE html>
+
+@app.get("/api/skills/{name}")
+async def get_skill(name: str, _=Depends(check_auth)):
+    p = SKILLS_DIR / f"{name}.md"
+    if not p.exists():
+        raise HTTPException(404)
+    return {"name": name, "content": p.read_text()}
+
+
+@app.post("/api/skills/{name}")
+async def save_skill(name: str, request: Request, _=Depends(check_auth)):
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    (SKILLS_DIR / f"{name}.md").write_text((await request.json()).get("content", ""))
+    return {"ok": True}
+
+
+@app.delete("/api/skills/{name}")
+async def delete_skill(name: str, _=Depends(check_auth)):
+    p = SKILLS_DIR / f"{name}.md"
+    if p.exists():
+        p.unlink()
+    return {"ok": True}
+
+
+HTML = open(__file__.replace("main.py", "ui.html")).read() if False else r"""<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>NanoBot Dashboard</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NanoBot Control Panel</title>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
-header{background:#1a1d2e;border-bottom:1px solid #2d3748;padding:14px 24px;display:flex;align-items:center;gap:16px}
-header h1{font-size:1.25rem;font-weight:700;color:#7c3aed}
-#status-badge{padding:4px 12px;border-radius:999px;font-size:.75rem;font-weight:600}
-.running{background:#065f46;color:#6ee7b7}.stopped{background:#7f1d1d;color:#fca5a5}
-#save-btn{margin-left:auto;background:#7c3aed;color:#fff;border:none;padding:8px 20px;border-radius:8px;cursor:pointer;font-weight:600}
-#save-btn:hover{background:#6d28d9}
-#restart-btn{background:#1e3a5f;color:#93c5fd;border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-weight:600}
-#restart-btn:hover{background:#1e40af}
-nav{display:flex;gap:4px;padding:12px 24px;background:#13151f;border-bottom:1px solid #2d3748;flex-wrap:wrap}
-.tab{padding:8px 18px;border-radius:8px;cursor:pointer;font-size:.875rem;color:#94a3b8;border:none;background:none}
-.tab:hover{background:#1e2130;color:#e2e8f0}
-.tab.active{background:#7c3aed;color:#fff}
-main{padding:24px;max-width:960px;margin:0 auto}
-.panel{display:none}.panel.active{display:block}
-h2{font-size:1rem;font-weight:700;margin-bottom:16px;color:#c4b5fd}
-h3{font-size:.9rem;font-weight:600;margin:20px 0 10px;color:#a78bfa}
-.card{background:#1a1d2e;border:1px solid #2d3748;border-radius:12px;padding:20px;margin-bottom:16px}
-label{display:block;font-size:.8rem;color:#94a3b8;margin-bottom:4px;margin-top:12px}
-label:first-child{margin-top:0}
-input[type=text],input[type=password],input[type=number],textarea,select{
-  width:100%;background:#0f1117;border:1px solid #2d3748;border-radius:8px;
-  padding:8px 12px;color:#e2e8f0;font-size:.875rem;outline:none}
-input:focus,textarea:focus,select:focus{border-color:#7c3aed}
-textarea{resize:vertical;min-height:80px;font-family:monospace}
-.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid #1e2130}
-.toggle-row:last-child{border-bottom:none}
-.toggle{position:relative;width:44px;height:24px}
-.toggle input{opacity:0;width:0;height:0}
-.slider{position:absolute;inset:0;background:#374151;border-radius:12px;cursor:pointer;transition:.3s}
-.slider:before{content:'';position:absolute;width:18px;height:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.3s}
-input:checked+.slider{background:#7c3aed}
-input:checked+.slider:before{transform:translateX(20px)}
-.row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
-#log-box{background:#0a0c14;border:1px solid #2d3748;border-radius:8px;padding:12px;font-family:monospace;font-size:.75rem;height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;color:#86efac}
-.log-toolbar{display:flex;gap:8px;margin-bottom:10px;align-items:center}
-.log-toolbar input{flex:1}
-.btn-sm{background:#1e2130;border:1px solid #374151;color:#94a3b8;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:.8rem}
-.btn-sm:hover{background:#2d3748;color:#e2e8f0}
-.btn-danger{background:#7f1d1d;border-color:#991b1b;color:#fca5a5}
-.btn-danger:hover{background:#991b1b}
-.skill-list{list-style:none;display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
-.skill-item{display:flex;align-items:center;justify-content:space-between;background:#0f1117;border:1px solid #2d3748;border-radius:8px;padding:10px 14px}
-.skill-item span{font-size:.875rem;color:#c4b5fd}
-.skill-actions{display:flex;gap:6px}
-.mcp-item{background:#0f1117;border:1px solid #2d3748;border-radius:8px;padding:14px;margin-bottom:10px}
-.mcp-item .row2{margin-top:8px}
-.add-btn{background:none;border:1px dashed #374151;color:#7c3aed;width:100%;padding:10px;border-radius:8px;cursor:pointer;font-size:.875rem}
-.add-btn:hover{background:#1e2130}
-.msg{padding:10px 14px;border-radius:8px;font-size:.85rem;margin-bottom:12px;display:none}
-.msg.success{background:#065f46;color:#6ee7b7;display:block}
-.msg.error{background:#7f1d1d;color:#fca5a5;display:block}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);min-height:100vh;padding:20px}
+.container{max-width:1100px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 25px 80px rgba(0,0,0,.5);overflow:hidden}
+.header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:26px 30px}
+.header h1{font-size:1.8em;font-weight:700}
+.header p{opacity:.8;margin-top:4px;font-size:.92em}
+.tabs{display:flex;background:#f1f3f5;border-bottom:2px solid #dee2e6;overflow-x:auto}
+.tab{flex:none;padding:13px 20px;background:none;border:none;cursor:pointer;font-size:.88em;font-weight:600;color:#6c757d;border-bottom:3px solid transparent;white-space:nowrap;transition:all .2s}
+.tab:hover{background:#e9ecef;color:#495057}
+.tab.active{background:#fff;color:#667eea;border-bottom-color:#667eea}
+.content{padding:26px}
+.pane{display:none}.pane.active{display:block}
+.sec{font-size:1.05em;font-weight:700;color:#1e293b;margin-bottom:16px;padding-bottom:8px;border-bottom:2px solid #e5e7eb}
+.card{background:#f8f9fa;border:1px solid #e9ecef;border-radius:10px;padding:18px;margin-bottom:16px}
+.dot{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px}
+.dot.on{background:#10b981;box-shadow:0 0 8px #10b981}.dot.off{background:#ef4444;box-shadow:0 0 8px #ef4444}
+.brow{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.btn{padding:9px 18px;border:none;border-radius:7px;cursor:pointer;font-size:.87em;font-weight:600;transition:all .2s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.15)}
+.bp{background:#667eea;color:#fff}.bd{background:#ef4444;color:#fff}.bs{background:#10b981;color:#fff}.bw{background:#f59e0b;color:#fff}.bg{background:#6c757d;color:#fff}
+.btn-sm{padding:5px 11px;font-size:.79em}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-bottom:14px}
+.pc{padding:13px;border:2px solid #e5e7eb;border-radius:10px;cursor:pointer;transition:all .2s;background:#fff}
+.pc:hover,.pc.active{border-color:#667eea;background:#f5f3ff}
+.pc .pn{font-weight:700;font-size:.88em;color:#1e293b}
+.pc .pd{font-size:.76em;color:#6b7280;margin-top:3px}
+.pform{background:#f8f9fa;border:1px solid #e5e7eb;border-radius:10px;padding:18px;margin-top:14px;display:none}
+.pform.show{display:block}
+.cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin-bottom:14px}
+.cc{padding:12px 14px;border:2px solid #e5e7eb;border-radius:10px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:all .2s;background:#fff}
+.cc:hover,.cc.active{border-color:#667eea;background:#f5f3ff}
+.cc .ci{font-size:1.3em}.cc .cn{font-weight:600;font-size:.87em;color:#1e293b}
+.cform{background:#f8f9fa;border:1px solid #e5e7eb;border-radius:10px;padding:18px;margin-top:12px;display:none}
+.cform.show{display:block}
+.fg{margin-bottom:13px}
+.fg label{display:block;margin-bottom:5px;font-weight:600;font-size:.83em;color:#374151}
+.fg input,.fg select,.fg textarea{width:100%;padding:9px 11px;border:2px solid #e5e7eb;border-radius:7px;font-size:.88em;transition:border-color .2s;background:#fff}
+.fg input:focus,.fg select:focus,.fg textarea:focus{outline:none;border-color:#667eea}
+.fg textarea{font-family:monospace;min-height:140px;resize:vertical}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin-bottom:14px}
+.sk{padding:13px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border-radius:10px;cursor:pointer;transition:transform .2s,box-shadow .2s;font-weight:700;font-size:.88em}
+.sk:hover{transform:translateY(-3px);box-shadow:0 8px 20px rgba(102,126,234,.4)}
+.seditor{margin-top:14px;display:none}.seditor.show{display:block}
+.log-bar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.log-search{flex:1;min-width:160px;padding:7px 11px;border:2px solid #e5e7eb;border-radius:7px;font-size:.86em}
+.log-search:focus{outline:none;border-color:#667eea}
+.logbox{background:#0f172a;color:#e2e8f0;padding:14px;border-radius:8px;font-family:monospace;font-size:.81em;max-height:540px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.5}
+.mitem{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:12px 14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
+.mn{font-weight:700;font-size:.88em;color:#1e293b}.mu{font-size:.76em;color:#6b7280;margin-top:2px}
+.toast{position:fixed;top:18px;right:18px;padding:11px 18px;background:#1e293b;color:#fff;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.25);opacity:0;transform:translateX(110%);transition:all .3s;z-index:9999;font-size:.88em;max-width:300px}
+.toast.show{opacity:1;transform:translateX(0)}.tok{border-left:4px solid #10b981}.terr{border-left:4px solid #ef4444}
 </style>
 </head>
 <body>
-<header>
-  <h1>&#x1F916; NanoBot</h1>
-  <span id="status-badge" class="stopped">Stopped</span>
-  <button id="restart-btn" onclick="restartGateway()">&#x21BB; Restart</button>
-  <button id="save-btn" onclick="saveConfig()">Save Config</button>
-</header>
-<nav>
-  <button class="tab active" onclick="switchTab('providers')">Providers</button>
-  <button class="tab" onclick="switchTab('channels')">Channels</button>
-  <button class="tab" onclick="switchTab('tools')">Tools</button>
-  <button class="tab" onclick="switchTab('mcp')">MCP Servers</button>
-  <button class="tab" onclick="switchTab('skills')">Skills</button>
-  <button class="tab" onclick="switchTab('memory')">Memory</button>
-  <button class="tab" onclick="switchTab('logs')">Logs</button>
-</nav>
-<main>
-<div id="flash" class="msg"></div>
-
-<!-- PROVIDERS -->
-<div id="panel-providers" class="panel active">
-<h2>AI Providers</h2>
-
-<div class="card">
-<h3>OpenRouter</h3>
-<label>API Key</label><input type="password" id="or-key" placeholder="sk-or-..."/>
-<label>API Base</label><input type="text" id="or-base" value="https://openrouter.ai/api/v1"/>
-<label>Default Model</label><input type="text" id="or-model" placeholder="openai/gpt-4o"/>
+<div class="container">
+ <div class="header">
+  <h1>&#x1F916; NanoBot Control Panel</h1>
+  <p>AI agent gateway &mdash; providers, channels, skills, memory, MCP</p>
+ </div>
+ <div class="tabs">
+  <button class="tab active" onclick="go('status')">&#x2665; Status</button>
+  <button class="tab" onclick="go('providers')">&#x26A1; Providers</button>
+  <button class="tab" onclick="go('channels')">&#x1F4AC; Channels</button>
+  <button class="tab" onclick="go('skills')">&#x1F9E0; Skills</button>
+  <button class="tab" onclick="go('memory')">&#x1F4DA; Memory</button>
+  <button class="tab" onclick="go('mcp')">&#x1F527; MCP</button>
+  <button class="tab" onclick="go('logs')">&#x1F4CB; Logs</button>
+ </div>
+ <div class="content">
+  <!-- STATUS -->
+  <div id="p-status" class="pane active">
+   <div class="sec">Gateway Status</div>
+   <div class="card">
+    <div><span class="dot off" id="gw-dot"></span><span id="gw-txt">Checking...</span></div>
+    <div class="brow">
+     <button class="btn bs" onclick="gwAct('start')">&#x25B6; Start</button>
+     <button class="btn bd" onclick="gwAct('stop')">&#x25A0; Stop</button>
+     <button class="btn bw" onclick="gwAct('restart')">&#x21BA; Restart</button>
+     <button class="btn bg" onclick="loadStatus()">&#x21BA; Refresh</button>
+    </div>
+   </div>
+  </div>
+  <!-- PROVIDERS -->
+  <div id="p-providers" class="pane">
+   <div class="sec">AI Provider</div>
+   <div class="pgrid" id="pgrid"></div>
+   <div class="pform" id="pform">
+    <div id="pf-title" style="font-weight:700;font-size:1em;margin-bottom:12px;color:#1e293b"></div>
+    <div id="pf-fields"></div>
+    <div class="brow">
+     <button class="btn bs" onclick="saveProvider()">Save</button>
+     <button class="btn bg" onclick="closeProvider()">Cancel</button>
+    </div>
+   </div>
+  </div>
+  <!-- CHANNELS -->
+  <div id="p-channels" class="pane">
+   <div class="sec">Messaging Channels</div>
+   <div class="cgrid" id="cgrid"></div>
+   <div class="cform" id="cform">
+    <div id="cf-title" style="font-weight:700;font-size:1em;margin-bottom:12px;color:#1e293b"></div>
+    <div id="cf-fields"></div>
+    <div class="brow">
+     <button class="btn bs" onclick="saveCh()">Save</button>
+     <button class="btn bg" onclick="closeCh()">Cancel</button>
+    </div>
+   </div>
+  </div>
+  <!-- SKILLS -->
+  <div id="p-skills" class="pane">
+   <div class="sec">Skills (SKILL.md files)</div>
+   <div class="brow" style="margin-bottom:12px">
+    <button class="btn bs" onclick="newSkill()">+ New Skill</button>
+    <button class="btn bg" onclick="loadSkills()">&#x21BA; Refresh</button>
+   </div>
+   <div class="sgrid" id="sgrid"></div>
+   <div class="seditor" id="seditor">
+    <div class="fg"><label>Skill Name</label><input type="text" id="sk-name" placeholder="my_skill"></div>
+    <div class="fg"><label>Content (Markdown)</label><textarea id="sk-content" style="min-height:260px" placeholder="# My Skill&#10;&#10;Describe the skill..."></textarea></div>
+    <div class="brow">
+     <button class="btn bs" onclick="saveSkill()">Save</button>
+     <button class="btn bd" onclick="delSkill()">Delete</button>
+     <button class="btn bg" onclick="closeSk()">Cancel</button>
+    </div>
+   </div>
+  </div>
+  <!-- MEMORY -->
+  <div id="p-memory" class="pane">
+   <div class="sec">Agent Memory</div>
+   <div class="fg"><label>memory.md</label><textarea id="mem" style="min-height:360px" placeholder="# Memory&#10;&#10;Agent memory in markdown..."></textarea></div>
+   <div class="brow">
+    <button class="btn bs" onclick="saveMem()">Save Memory</button>
+    <button class="btn bg" onclick="loadMemory()">&#x21BA; Refresh</button>
+   </div>
+  </div>
+  <!-- MCP -->
+  <div id="p-mcp" class="pane">
+   <div class="sec">MCP Servers</div>
+   <div id="mlist"></div>
+   <div class="card" style="margin-top:14px">
+    <div style="font-weight:700;margin-bottom:12px;font-size:.95em">Add MCP Server</div>
+    <div class="fg"><label>Name</label><input type="text" id="mcp-name" placeholder="my-server"></div>
+    <div class="fg"><label>Type</label>
+     <select id="mcp-type" onchange="mcpType()">
+      <option value="sse">SSE (HTTP)</option>
+      <option value="stdio">Stdio (local process)</option>
+     </select>
+    </div>
+    <div id="mcp-sse">
+     <div class="fg"><label>URL</label><input type="text" id="mcp-url" placeholder="http://localhost:8080/sse"></div>
+    </div>
+    <div id="mcp-stdio" style="display:none">
+     <div class="fg"><label>Command</label><input type="text" id="mcp-cmd" placeholder="node"></div>
+     <div class="fg"><label>Arguments (space-separated)</label><input type="text" id="mcp-args" placeholder="/path/to/server.js arg1"></div>
+     <div class="fg"><label>Working Directory</label><input type="text" id="mcp-cwd" placeholder="/home/user/project"></div>
+    </div>
+    <div class="brow"><button class="btn bs" onclick="addMcp()">Add Server</button></div>
+   </div>
+  </div>
+  <!-- LOGS -->
+  <div id="p-logs" class="pane">
+   <div class="sec">Gateway Logs</div>
+   <div class="log-bar">
+    <input class="log-search" id="log-q" placeholder="Filter logs..." oninput="filterLogs()">
+    <button class="btn bp btn-sm" onclick="loadLogs()">&#x21BA; Refresh</button>
+    <button class="btn bd btn-sm" onclick="clearLogs()">Clear</button>
+    <label style="display:flex;align-items:center;gap:5px;font-size:.84em;font-weight:600;cursor:pointer">
+     <input type="checkbox" id="auto-ref" onchange="autoRef()"> Auto
+    </label>
+   </div>
+   <div class="logbox" id="logbox">Loading...</div>
+  </div>
+ </div>
 </div>
-
-<div class="card">
-<h3>OpenAI</h3>
-<label>API Key</label><input type="password" id="oai-key" placeholder="sk-..."/>
-<label>API Base</label><input type="text" id="oai-base" value="https://api.openai.com/v1"/>
-<label>Default Model</label><input type="text" id="oai-model" placeholder="gpt-4o"/>
-</div>
-
-<div class="card">
-<h3>Anthropic</h3>
-<label>API Key</label><input type="password" id="ant-key" placeholder="sk-ant-..."/>
-<label>Default Model</label><input type="text" id="ant-model" placeholder="claude-3-5-sonnet-20241022"/>
-</div>
-
-<div class="card">
-<h3>Google Gemini</h3>
-<label>API Key</label><input type="password" id="gem-key" placeholder="AIza..."/>
-<label>Default Model</label><input type="text" id="gem-model" placeholder="gemini-1.5-pro"/>
-</div>
-
-<div class="card">
-<h3>DeepSeek</h3>
-<label>API Key</label><input type="password" id="ds-key" placeholder="sk-..."/>
-<label>API Base</label><input type="text" id="ds-base" value="https://api.deepseek.com/v1"/>
-<label>Default Model</label><input type="text" id="ds-model" placeholder="deepseek-chat"/>
-</div>
-
-<div class="card">
-<h3>Groq</h3>
-<label>API Key</label><input type="password" id="groq-key" placeholder="gsk_..."/>
-<label>Default Model</label><input type="text" id="groq-model" placeholder="llama-3.3-70b-versatile"/>
-</div>
-
-<div class="card">
-<h3>Moonshot</h3>
-<label>API Key</label><input type="password" id="moon-key" placeholder="sk-..."/>
-<label>API Base</label><input type="text" id="moon-base" value="https://api.moonshot.cn/v1"/>
-<label>Default Model</label><input type="text" id="moon-model" placeholder="moonshot-v1-8k"/>
-</div>
-
-<div class="card">
-<h3>Zhipu AI</h3>
-<label>API Key</label><input type="password" id="zhipu-key" placeholder="..."/>
-<label>Default Model</label><input type="text" id="zhipu-model" placeholder="glm-4"/>
-</div>
-
-<div class="card">
-<h3>DashScope (Alibaba)</h3>
-<label>API Key</label><input type="password" id="dash-key" placeholder="sk-..."/>
-<label>Default Model</label><input type="text" id="dash-model" placeholder="qwen-turbo"/>
-</div>
-
-<div class="card">
-<h3>AiHubMix</h3>
-<label>API Key</label><input type="password" id="ahm-key" placeholder="..."/>
-<label>API Base</label><input type="text" id="ahm-base" value="https://aihubmix.com/v1"/>
-<label>Default Model</label><input type="text" id="ahm-model" placeholder="gpt-4o"/>
-</div>
-
-<div class="card">
-<h3>NVIDIA NIM</h3>
-<label>API Key</label><input type="password" id="nvidia-key" placeholder="nvapi-..."/>
-<label>API Base</label><input type="text" id="nvidia-base" value="https://integrate.api.nvidia.com/v1"/>
-<label>Default Model</label><input type="text" id="nvidia-model" placeholder="meta/llama-3.1-70b-instruct"/>
-</div>
-
-<div class="card">
-<h3>vLLM (Self-hosted)</h3>
-<label>API Base URL</label><input type="text" id="vllm-base" placeholder="http://localhost:8000/v1"/>
-<label>Model Name</label><input type="text" id="vllm-model" placeholder="your-model-name"/>
-<label>API Key (optional)</label><input type="password" id="vllm-key" placeholder="token-..."/>
-</div>
-
-</div><!-- /panel-providers -->
-
-<!-- CHANNELS -->
-<div id="panel-channels" class="panel">
-<h2>Channels</h2>
-
-<div class="card">
-<h3>Telegram</h3>
-<div class="toggle-row"><span>Enabled</span><label class="toggle"><input type="checkbox" id="tg-enabled"/><span class="slider"></span></label></div>
-<label>Bot Token</label><input type="password" id="tg-token" placeholder="123456:ABC-..."/>
-</div>
-
-<div class="card">
-<h3>Discord</h3>
-<div class="toggle-row"><span>Enabled</span><label class="toggle"><input type="checkbox" id="dc-enabled"/><span class="slider"></span></label></div>
-<label>Bot Token</label><input type="password" id="dc-token" placeholder="MTI..."/>
-<label>Application ID</label><input type="text" id="dc-app-id" placeholder="123456789"/>
-</div>
-
-<div class="card">
-<h3>Slack</h3>
-<div class="toggle-row"><span>Enabled</span><label class="toggle"><input type="checkbox" id="sl-enabled"/><span class="slider"></span></label></div>
-<label>Bot Token</label><input type="password" id="sl-token" placeholder="xoxb-..."/>
-<label>App Token</label><input type="password" id="sl-app-token" placeholder="xapp-..."/>
-<label>Signing Secret</label><input type="password" id="sl-secret" placeholder="..."/>
-</div>
-
-<div class="card">
-<h3>WhatsApp</h3>
-<div class="toggle-row"><span>Enabled</span><label class="toggle"><input type="checkbox" id="wa-enabled"/><span class="slider"></span></label></div>
-<label>Phone Number ID</label><input type="text" id="wa-phone-id" placeholder="123456789"/>
-<label>Access Token</label><input type="password" id="wa-token" placeholder="EAAx..."/>
-<label>Verify Token</label><input type="text" id="wa-verify" placeholder="my-verify-token"/>
-</div>
-
-<div class="card">
-<h3>Lark / Feishu</h3>
-<div class="toggle-row"><span>Enabled</span><label class="toggle"><input type="checkbox" id="lk-enabled"/><span class="slider"></span></label></div>
-<label>App ID</label><input type="text" id="lk-app-id" placeholder="cli_..."/>
-<label>App Secret</label><input type="password" id="lk-secret" placeholder="..."/>
-<label>Verification Token</label><input type="text" id="lk-verify" placeholder="..."/>
-</div>
-
-<div class="card">
-<h3>DingTalk</h3>
-<div class="toggle-row"><span>Enabled</span><label class="toggle"><input type="checkbox" id="dt-enabled"/><span class="slider"></span></label></div>
-<label>App Key</label><input type="text" id="dt-key" placeholder="..."/>
-<label>App Secret</label><input type="password" id="dt-secret" placeholder="..."/>
-</div>
-
-<div class="card">
-<h3>WeChat Work (企业微信)</h3>
-<div class="toggle-row"><span>Enabled</span><label class="toggle"><input type="checkbox" id="wx-enabled"/><span class="slider"></span></label></div>
-<label>Corp ID</label><input type="text" id="wx-corp" placeholder="ww..."/>
-<label>Agent ID</label><input type="text" id="wx-agent" placeholder="1000001"/>
-<label>Agent Secret</label><input type="password" id="wx-secret" placeholder="..."/>
-<label>Token</label><input type="text" id="wx-token" placeholder="..."/>
-<label>Encoding AES Key</label><input type="text" id="wx-aes" placeholder="..."/>
-</div>
-
-<div class="card">
-<h3>Matrix</h3>
-<div class="toggle-row"><span>Enabled</span><label class="toggle"><input type="checkbox" id="mx-enabled"/><span class="slider"></span></label></div>
-<label>Homeserver URL</label><input type="text" id="mx-server" placeholder="https://matrix.org"/>
-<label>Access Token</label><input type="password" id="mx-token" placeholder="syt_..."/>
-<label>User ID</label><input type="text" id="mx-user" placeholder="@bot:matrix.org"/>
-</div>
-
-<div class="card">
-<h3>IRC</h3>
-<div class="toggle-row"><span>Enabled</span><label class="toggle"><input type="checkbox" id="irc-enabled"/><span class="slider"></span></label></div>
-<label>Server</label><input type="text" id="irc-server" placeholder="irc.libera.chat"/>
-<label>Port</label><input type="number" id="irc-port" value="6697"/>
-<label>Nick</label><input type="text" id="irc-nick" placeholder="nanobot"/>
-<label>Channel</label><input type="text" id="irc-chan" placeholder="#mychannel"/>
-<label>Password (optional)</label><input type="password" id="irc-pass" placeholder="..."/>
-</div>
-
-</div><!-- /panel-channels -->
-
-<!-- TOOLS -->
-<div id="panel-tools" class="panel">
-<h2>Built-in Tools</h2>
-<div class="card">
-<div class="toggle-row"><span>Web Search</span><label class="toggle"><input type="checkbox" id="tool-search"/><span class="slider"></span></label></div>
-<div class="toggle-row"><span>Web Scrape / Browse</span><label class="toggle"><input type="checkbox" id="tool-scrape"/><span class="slider"></span></label></div>
-<div class="toggle-row"><span>Code Execution (Python)</span><label class="toggle"><input type="checkbox" id="tool-code"/><span class="slider"></span></label></div>
-<div class="toggle-row"><span>Image Generation</span><label class="toggle"><input type="checkbox" id="tool-image"/><span class="slider"></span></label></div>
-<div class="toggle-row"><span>File Read/Write</span><label class="toggle"><input type="checkbox" id="tool-files"/><span class="slider"></span></label></div>
-<div class="toggle-row"><span>Wikipedia</span><label class="toggle"><input type="checkbox" id="tool-wiki"/><span class="slider"></span></label></div>
-<div class="toggle-row"><span>Calculator</span><label class="toggle"><input type="checkbox" id="tool-calc"/><span class="slider"></span></label></div>
-<div class="toggle-row"><span>Weather</span><label class="toggle"><input type="checkbox" id="tool-weather"/><span class="slider"></span></label></div>
-</div>
-<div class="card">
-<h3>System Prompt</h3>
-<label>Custom system prompt (appended to default)</label>
-<textarea id="sys-prompt" rows="6" placeholder="You are a helpful assistant..."></textarea>
-</div>
-</div><!-- /panel-tools -->
-
-<!-- MCP -->
-<div id="panel-mcp" class="panel">
-<h2>MCP Servers</h2>
-<div id="mcp-list"></div>
-<button class="add-btn" onclick="addMCP()">+ Add MCP Server</button>
-</div>
-
-<!-- SKILLS -->
-<div id="panel-skills" class="panel">
-<h2>Skills (SKILL.md files)</h2>
-<ul class="skill-list" id="skill-list"></ul>
-<div class="card">
-<h3>New Skill</h3>
-<label>Skill Name</label><input type="text" id="skill-name" placeholder="my-skill"/>
-<label>Content (Markdown)</label>
-<textarea id="skill-content" rows="10" placeholder="# My Skill&#10;&#10;Describe the skill here..."></textarea>
-<button class="btn-sm" style="margin-top:12px" onclick="saveSkill()">Save Skill</button>
-</div>
-</div>
-
-<!-- MEMORY -->
-<div id="panel-memory" class="panel">
-<h2>Memory (memory.md)</h2>
-<div class="card">
-<label>Edit memory.md — facts NanoBot should always remember</label>
-<textarea id="memory-content" rows="20" placeholder="# Memory&#10;&#10;- User's name is Alice&#10;- Timezone: UTC+8"></textarea>
-<button class="btn-sm" style="margin-top:12px" onclick="saveMemory()">Save Memory</button>
-</div>
-</div>
-
-<!-- LOGS -->
-<div id="panel-logs" class="panel">
-<h2>Gateway Logs</h2>
-<div class="log-toolbar">
-<input type="text" id="log-filter" placeholder="Filter logs..." oninput="filterLogs()"/>
-<button class="btn-sm" onclick="loadLogs()">&#x21BB; Refresh</button>
-<button class="btn-sm btn-danger" onclick="clearLogs()">Clear</button>
-<label class="toggle" title="Auto-refresh"><input type="checkbox" id="auto-refresh" onchange="toggleAutoRefresh()"/><span class="slider"></span></label>
-<span style="font-size:.75rem;color:#64748b">Auto</span>
-</div>
-<div id="log-box"></div>
-</div>
-
-</main>
-
+<div class="toast" id="toast"></div>
 <script>
-const $ = id => document.getElementById(id);
-let cfg = {};
-let allLogLines = [];
-let autoRefreshTimer = null;
-let mcpEntries = [];
+// Toast
+function toast(m,t='ok'){const el=document.getElementById('toast');el.textContent=m;el.className='toast show '+(t==='ok'?'tok':'terr');clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove('show'),3000);}
 
-// ── Tab switching ──────────────────────────────────────────────────────────────
-function switchTab(name) {
-  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  $('panel-' + name).classList.add('active');
-  event.target.classList.add('active');
-  if (name === 'logs') loadLogs();
-  if (name === 'skills') loadSkills();
-  if (name === 'memory') loadMemory();
+// Tab navigation
+const TABS=['status','providers','channels','skills','memory','mcp','logs'];
+const LOADERS={status:loadStatus,providers:loadProviders,channels:loadChannels,skills:loadSkills,memory:loadMemory,mcp:loadMcp,logs:loadLogs};
+function go(id){
+  document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',TABS[i]===id);});
+  TABS.forEach(t=>document.getElementById('p-'+t).classList.toggle('active',t===id));
+  if(LOADERS[id])LOADERS[id]();
 }
 
-// ── Flash ──────────────────────────────────────────────────────────────────────
-function flash(msg, type='success') {
-  const el = $('flash');
-  el.textContent = msg;
-  el.className = 'msg ' + type;
-  setTimeout(() => { el.className = 'msg'; }, 3000);
+// Status
+async function loadStatus(){
+  try{const d=await fetch('/api/status').then(r=>r.json());
+   document.getElementById('gw-dot').className='dot '+(d.gateway_running?'on':'off');
+   document.getElementById('gw-txt').textContent='Gateway '+(d.gateway_running?'RUNNING':'STOPPED');
+  }catch(e){toast('Status error','err');}
+}
+async function gwAct(a){
+  try{await fetch('/api/gateway/'+a,{method:'POST'});toast(a+' OK');setTimeout(loadStatus,1200);}
+  catch(e){toast('Failed','err');}
 }
 
-// ── Status ─────────────────────────────────────────────────────────────────────
-async function pollStatus() {
-  try {
-    const r = await fetch('/api/status');
-    const d = await r.json();
-    const badge = $('status-badge');
-    badge.textContent = d.gateway_running ? 'Running' : 'Stopped';
-    badge.className = d.gateway_running ? 'running' : 'stopped';
-  } catch {}
-}
-setInterval(pollStatus, 5000);
-pollStatus();
-
-// ── Load config ────────────────────────────────────────────────────────────────
-async function loadConfig() {
-  const r = await fetch('/api/config');
-  cfg = await r.json();
-  const p = cfg.providers || {};
-  const or = p.openrouter || {};
-  $('or-key').value = or.api_key || '';
-  $('or-base').value = or.api_base || 'https://openrouter.ai/api/v1';
-  $('or-model').value = or.default_model || '';
-  const oai = p.openai || {};
-  $('oai-key').value = oai.api_key || '';
-  $('oai-base').value = oai.api_base || 'https://api.openai.com/v1';
-  $('oai-model').value = oai.default_model || '';
-  const ant = p.anthropic || {};
-  $('ant-key').value = ant.api_key || '';
-  $('ant-model').value = ant.default_model || '';
-  const gem = p.gemini || {};
-  $('gem-key').value = gem.api_key || '';
-  $('gem-model').value = gem.default_model || '';
-  const ds = p.deepseek || {};
-  $('ds-key').value = ds.api_key || '';
-  $('ds-base').value = ds.api_base || 'https://api.deepseek.com/v1';
-  $('ds-model').value = ds.default_model || '';
-  const groq = p.groq || {};
-  $('groq-key').value = groq.api_key || '';
-  $('groq-model').value = groq.default_model || '';
-  const moon = p.moonshot || {};
-  $('moon-key').value = moon.api_key || '';
-  $('moon-base').value = moon.api_base || 'https://api.moonshot.cn/v1';
-  $('moon-model').value = moon.default_model || '';
-  const zhipu = p.zhipu || {};
-  $('zhipu-key').value = zhipu.api_key || '';
-  $('zhipu-model').value = zhipu.default_model || '';
-  const dash = p.dashscope || {};
-  $('dash-key').value = dash.api_key || '';
-  $('dash-model').value = dash.default_model || '';
-  const ahm = p.aihubmix || {};
-  $('ahm-key').value = ahm.api_key || '';
-  $('ahm-base').value = ahm.api_base || 'https://aihubmix.com/v1';
-  $('ahm-model').value = ahm.default_model || '';
-  const nv = p.nvidia || {};
-  $('nvidia-key').value = nv.api_key || '';
-  $('nvidia-base').value = nv.api_base || 'https://integrate.api.nvidia.com/v1';
-  $('nvidia-model').value = nv.default_model || '';
-  const vllm = p.vllm || {};
-  $('vllm-base').value = vllm.api_base || '';
-  $('vllm-model').value = vllm.default_model || '';
-  $('vllm-key').value = vllm.api_key || '';
-
-  // Channels
-  const ch = cfg.channels || {};
-  const tg = ch.telegram || {};
-  $('tg-enabled').checked = !!tg.enabled;
-  $('tg-token').value = tg.token || '';
-  const dc = ch.discord || {};
-  $('dc-enabled').checked = !!dc.enabled;
-  $('dc-token').value = dc.token || '';
-  $('dc-app-id').value = dc.application_id || '';
-  const sl = ch.slack || {};
-  $('sl-enabled').checked = !!sl.enabled;
-  $('sl-token').value = sl.bot_token || '';
-  $('sl-app-token').value = sl.app_token || '';
-  $('sl-secret').value = sl.signing_secret || '';
-  const wa = ch.whatsapp || {};
-  $('wa-enabled').checked = !!wa.enabled;
-  $('wa-phone-id').value = wa.phone_number_id || '';
-  $('wa-token').value = wa.access_token || '';
-  $('wa-verify').value = wa.verify_token || '';
-  const lk = ch.lark || {};
-  $('lk-enabled').checked = !!lk.enabled;
-  $('lk-app-id').value = lk.app_id || '';
-  $('lk-secret').value = lk.app_secret || '';
-  $('lk-verify').value = lk.verification_token || '';
-  const dt = ch.dingtalk || {};
-  $('dt-enabled').checked = !!dt.enabled;
-  $('dt-key').value = dt.app_key || '';
-  $('dt-secret').value = dt.app_secret || '';
-  const wx = ch.wechat || {};
-  $('wx-enabled').checked = !!wx.enabled;
-  $('wx-corp').value = wx.corp_id || '';
-  $('wx-agent').value = wx.agent_id || '';
-  $('wx-secret').value = wx.secret || '';
-  $('wx-token').value = wx.token || '';
-  $('wx-aes').value = wx.encoding_aes_key || '';
-  const mx = ch.matrix || {};
-  $('mx-enabled').checked = !!mx.enabled;
-  $('mx-server').value = mx.homeserver || '';
-  $('mx-token').value = mx.access_token || '';
-  $('mx-user').value = mx.user_id || '';
-  const irc = ch.irc || {};
-  $('irc-enabled').checked = !!irc.enabled;
-  $('irc-server').value = irc.server || '';
-  $('irc-port').value = irc.port || 6697;
-  $('irc-nick').value = irc.nick || '';
-  $('irc-chan').value = irc.channel || '';
-  $('irc-pass').value = irc.password || '';
-
-  // Tools
-  const tools = cfg.tools || {};
-  $('tool-search').checked = !!tools.web_search;
-  $('tool-scrape').checked = !!tools.web_scrape;
-  $('tool-code').checked = !!tools.code_execution;
-  $('tool-image').checked = !!tools.image_generation;
-  $('tool-files').checked = !!tools.file_rw;
-  $('tool-wiki').checked = !!tools.wikipedia;
-  $('tool-calc').checked = !!tools.calculator;
-  $('tool-weather').checked = !!tools.weather;
-  $('sys-prompt').value = cfg.system_prompt || '';
-
-  // MCP
-  mcpEntries = cfg.mcp_servers ? [...cfg.mcp_servers] : [];
-  renderMCP();
-}
-
-// ── Save config ────────────────────────────────────────────────────────────────
-async function saveConfig() {
-  const newCfg = {
-    providers: {
-      openrouter: {api_key: $('or-key').value, api_base: $('or-base').value, default_model: $('or-model').value},
-      openai: {api_key: $('oai-key').value, api_base: $('oai-base').value, default_model: $('oai-model').value},
-      anthropic: {api_key: $('ant-key').value, default_model: $('ant-model').value},
-      gemini: {api_key: $('gem-key').value, default_model: $('gem-model').value},
-      deepseek: {api_key: $('ds-key').value, api_base: $('ds-base').value, default_model: $('ds-model').value},
-      groq: {api_key: $('groq-key').value, default_model: $('groq-model').value},
-      moonshot: {api_key: $('moon-key').value, api_base: $('moon-base').value, default_model: $('moon-model').value},
-      zhipu: {api_key: $('zhipu-key').value, default_model: $('zhipu-model').value},
-      dashscope: {api_key: $('dash-key').value, default_model: $('dash-model').value},
-      aihubmix: {api_key: $('ahm-key').value, api_base: $('ahm-base').value, default_model: $('ahm-model').value},
-      nvidia: {api_key: $('nvidia-key').value, api_base: $('nvidia-base').value, default_model: $('nvidia-model').value},
-      vllm: {api_base: $('vllm-base').value, default_model: $('vllm-model').value, api_key: $('vllm-key').value},
-    },
-    channels: {
-      telegram: {enabled: $('tg-enabled').checked, token: $('tg-token').value},
-      discord: {enabled: $('dc-enabled').checked, token: $('dc-token').value, application_id: $('dc-app-id').value},
-      slack: {enabled: $('sl-enabled').checked, bot_token: $('sl-token').value, app_token: $('sl-app-token').value, signing_secret: $('sl-secret').value},
-      whatsapp: {enabled: $('wa-enabled').checked, phone_number_id: $('wa-phone-id').value, access_token: $('wa-token').value, verify_token: $('wa-verify').value},
-      lark: {enabled: $('lk-enabled').checked, app_id: $('lk-app-id').value, app_secret: $('lk-secret').value, verification_token: $('lk-verify').value},
-      dingtalk: {enabled: $('dt-enabled').checked, app_key: $('dt-key').value, app_secret: $('dt-secret').value},
-      wechat: {enabled: $('wx-enabled').checked, corp_id: $('wx-corp').value, agent_id: $('wx-agent').value, secret: $('wx-secret').value, token: $('wx-token').value, encoding_aes_key: $('wx-aes').value},
-      matrix: {enabled: $('mx-enabled').checked, homeserver: $('mx-server').value, access_token: $('mx-token').value, user_id: $('mx-user').value},
-      irc: {enabled: $('irc-enabled').checked, server: $('irc-server').value, port: parseInt($('irc-port').value)||6697, nick: $('irc-nick').value, channel: $('irc-chan').value, password: $('irc-pass').value},
-    },
-    tools: {
-      web_search: $('tool-search').checked,
-      web_scrape: $('tool-scrape').checked,
-      code_execution: $('tool-code').checked,
-      image_generation: $('tool-image').checked,
-      file_rw: $('tool-files').checked,
-      wikipedia: $('tool-wiki').checked,
-      calculator: $('tool-calc').checked,
-      weather: $('tool-weather').checked,
-    },
-    system_prompt: $('sys-prompt').value,
-    mcp_servers: mcpEntries,
-  };
-  const r = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(newCfg)});
-  const d = await r.json();
-  if (d.success) flash('Config saved!');
-  else flash('Error: ' + d.error, 'error');
-}
-
-// ── Restart ────────────────────────────────────────────────────────────────────
-async function restartGateway() {
-  $('restart-btn').textContent = 'Restarting...';
-  const r = await fetch('/api/restart', {method:'POST'});
-  const d = await r.json();
-  $('restart-btn').textContent = '\u21BB Restart';
-  if (d.success) flash('Gateway restarted!');
-  else flash('Error: ' + d.error, 'error');
-  pollStatus();
-}
-
-// ── MCP ────────────────────────────────────────────────────────────────────────
-function renderMCP() {
-  const container = $('mcp-list');
-  container.innerHTML = '';
-  mcpEntries.forEach((entry, i) => {
-    const div = document.createElement('div');
-    div.className = 'mcp-item';
-    div.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <strong style="color:#c4b5fd">MCP #${i+1}</strong>
-        <button class="btn-sm btn-danger" onclick="removeMCP(${i})">Remove</button>
-      </div>
-      <div class="row2">
-        <div><label>Name</label><input type="text" value="${entry.name||''}" oninput="mcpEntries[${i}].name=this.value" placeholder="my-server"/></div>
-        <div><label>Type</label>
-          <select onchange="mcpEntries[${i}].type=this.value;renderMCP()">
-            <option value="stdio" ${entry.type==='stdio'?'selected':''}>stdio</option>
-            <option value="sse" ${entry.type==='sse'?'selected':''}>SSE / HTTP</option>
-          </select>
-        </div>
-      </div>
-      ${entry.type==='sse' ? `
-        <label>URL</label><input type="text" value="${entry.url||''}" oninput="mcpEntries[${i}].url=this.value" placeholder="https://..."/>
-        <label>Auth Token (optional)</label><input type="password" value="${entry.auth_token||''}" oninput="mcpEntries[${i}].auth_token=this.value"/>
-      ` : `
-        <label>Command</label><input type="text" value="${entry.command||''}" oninput="mcpEntries[${i}].command=this.value" placeholder="node server.js"/>
-        <label>Args (space-separated)</label><input type="text" value="${(entry.args||[]).join(' ')}" oninput="mcpEntries[${i}].args=this.value.split(' ').filter(Boolean)" placeholder="--port 3000"/>
-        <label>Working Directory</label><input type="text" value="${entry.cwd||''}" oninput="mcpEntries[${i}].cwd=this.value" placeholder="/path/to/server"/>
-      `}
-    `;
-    container.appendChild(div);
-  });
-}
-
-function addMCP() {
-  mcpEntries.push({name:'', type:'stdio', command:'', args:[], cwd:'', url:'', auth_token:''});
-  renderMCP();
-}
-
-function removeMCP(i) {
-  mcpEntries.splice(i, 1);
-  renderMCP();
-}
-
-// ── Skills ─────────────────────────────────────────────────────────────────────
-async function loadSkills() {
-  const r = await fetch('/api/skills');
-  const d = await r.json();
-  const list = $('skill-list');
-  list.innerHTML = '';
-  (d.skills || []).forEach(s => {
-    const li = document.createElement('li');
-    li.className = 'skill-item';
-    li.innerHTML = `<span>${s.name}.md <small style="color:#64748b">(${(s.size/1024).toFixed(1)}KB)</small></span>
-      <div class="skill-actions">
-        <button class="btn-sm" onclick="editSkill('${s.name}')">Edit</button>
-        <button class="btn-sm btn-danger" onclick="deleteSkill('${s.name}')">Delete</button>
-      </div>`;
-    list.appendChild(li);
-  });
-}
-
-async function editSkill(name) {
-  const r = await fetch('/api/skills/' + name);
-  const d = await r.json();
-  $('skill-name').value = d.name;
-  $('skill-content').value = d.content;
-}
-
-async function saveSkill() {
-  const name = $('skill-name').value.trim();
-  if (!name) { flash('Enter a skill name', 'error'); return; }
-  const r = await fetch('/api/skills/' + name, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content: $('skill-content').value})});
-  const d = await r.json();
-  if (d.success) { flash('Skill saved!'); loadSkills(); $('skill-name').value=''; $('skill-content').value=''; }
-  else flash('Error: ' + d.error, 'error');
-}
-
-async function deleteSkill(name) {
-  if (!confirm('Delete skill ' + name + '?')) return;
-  await fetch('/api/skills/' + name, {method:'DELETE'});
-  loadSkills();
-}
-
-// ── Memory ─────────────────────────────────────────────────────────────────────
-async function loadMemory() {
-  const r = await fetch('/api/memory');
-  const d = await r.json();
-  $('memory-content').value = d.content || '';
-}
-
-async function saveMemory() {
-  const r = await fetch('/api/memory', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content: $('memory-content').value})});
-  const d = await r.json();
-  if (d.success) flash('Memory saved!');
-  else flash('Error: ' + d.error, 'error');
-}
-
-// ── Logs ───────────────────────────────────────────────────────────────────────
-async function loadLogs() {
-  const r = await fetch('/api/logs?lines=300');
-  const d = await r.json();
-  allLogLines = d.lines || [];
-  filterLogs();
-  const box = $('log-box');
-  box.scrollTop = box.scrollHeight;
-}
-
-function filterLogs() {
-  const q = $('log-filter').value.toLowerCase();
-  const filtered = q ? allLogLines.filter(l => l.toLowerCase().includes(q)) : allLogLines;
-  $('log-box').textContent = filtered.join('');
-}
-
-async function clearLogs() {
-  if (!confirm('Clear all logs?')) return;
-  await fetch('/api/logs/clear', {method:'POST'});
-  allLogLines = [];
-  $('log-box').textContent = '';
-}
-
-function toggleAutoRefresh() {
-  if ($('auto-refresh').checked) {
-    autoRefreshTimer = setInterval(loadLogs, 3000);
-  } else {
-    clearInterval(autoRefreshTimer);
-    autoRefreshTimer = null;
+// Config cache
+let _cfg=null;
+async function getCfg(){if(!_cfg)_cfg=await fetch('/api/config').then(r=>r.json()).catch(()=>({}));return _cfg;}
+async function patchCfg(patch){
+  const cfg=await getCfg();
+  for(const k of Object.keys(patch)){
+    if(typeof patch[k]==='object'&&!Array.isArray(patch[k])&&patch[k]!==null)cfg[k]={...(cfg[k]||{}),...patch[k]};
+    else cfg[k]=patch[k];
   }
+  _cfg=cfg;
+  await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
 }
 
-// ── Init ───────────────────────────────────────────────────────────────────────
-loadConfig();
+// Providers
+const PROVIDERS=[
+ {id:'openrouter',name:'OpenRouter',desc:'200+ models unified',fields:[{k:'openrouter_api_key',l:'API Key',t:'password',p:'sk-or-...'},{k:'openrouter_model',l:'Model',t:'text',p:'openai/gpt-4o'}]},
+ {id:'openai',name:'OpenAI',desc:'GPT-4o, o1, o3',fields:[{k:'openai_api_key',l:'API Key',t:'password',p:'sk-...'},{k:'openai_model',l:'Model',t:'text',p:'gpt-4o'},{k:'openai_base_url',l:'Base URL',t:'text',p:'https://api.openai.com/v1'}]},
+ {id:'anthropic',name:'Anthropic',desc:'Claude 3.5 Sonnet',fields:[{k:'anthropic_api_key',l:'API Key',t:'password',p:'sk-ant-...'},{k:'anthropic_model',l:'Model',t:'text',p:'claude-3-5-sonnet-20241022'}]},
+ {id:'gemini',name:'Google Gemini',desc:'Gemini 2.0 Flash',fields:[{k:'gemini_api_key',l:'API Key',t:'password',p:'AIza...'},{k:'gemini_model',l:'Model',t:'text',p:'gemini-2.0-flash-exp'}]},
+ {id:'deepseek',name:'DeepSeek',desc:'DeepSeek-V3, R1',fields:[{k:'deepseek_api_key',l:'API Key',t:'password',p:'sk-...'},{k:'deepseek_model',l:'Model',t:'text',p:'deepseek-chat'}]},
+ {id:'groq',name:'Groq',desc:'LLaMA ultra-fast',fields:[{k:'groq_api_key',l:'API Key',t:'password',p:'gsk_...'},{k:'groq_model',l:'Model',t:'text',p:'llama-3.3-70b-versatile'}]},
+ {id:'moonshot',name:'Moonshot',desc:'Kimi long-context',fields:[{k:'moonshot_api_key',l:'API Key',t:'password',p:'...'},{k:'moonshot_model',l:'Model',t:'text',p:'moonshot-v1-128k'}]},
+ {id:'zhipu',name:'Zhipu AI',desc:'GLM-4 series',fields:[{k:'zhipu_api_key',l:'API Key',t:'password',p:'...'},{k:'zhipu_model',l:'Model',t:'text',p:'glm-4'}]},
+ {id:'dashscope',name:'DashScope',desc:'Alibaba Qwen',fields:[{k:'dashscope_api_key',l:'API Key',t:'password',p:'sk-...'},{k:'dashscope_model',l:'Model',t:'text',p:'qwen-max'}]},
+ {id:'aihubmix',name:'AiHubMix',desc:'Multi-model hub',fields:[{k:'aihubmix_api_key',l:'API Key',t:'password',p:'...'},{k:'aihubmix_model',l:'Model',t:'text',p:'gpt-4o'}]},
+ {id:'nvidia',name:'NVIDIA NIM',desc:'NVIDIA cloud AI',fields:[{k:'nvidia_api_key',l:'API Key',t:'password',p:'nvapi-...'},{k:'nvidia_model',l:'Model',t:'text',p:'meta/llama-3.1-70b-instruct'}]},
+ {id:'vllm',name:'vLLM (Local)',desc:'Self-hosted vLLM',fields:[{k:'vllm_base_url',l:'Base URL',t:'text',p:'http://localhost:8000/v1'},{k:'vllm_model',l:'Model',t:'text',p:'Qwen/Qwen2.5-7B'},{k:'vllm_api_key',l:'API Key',t:'password',p:'token'}]},
+];
+let _ap=null;
+async function loadProviders(){
+  const cfg=await getCfg();
+  document.getElementById('pgrid').innerHTML=PROVIDERS.map(p=>`
+   <div class="pc" id="pc-${p.id}" onclick="openP('${p.id}')">
+    <div class="pn">${p.name}</div><div class="pd">${p.desc}</div>
+   </div>`).join('');
+  for(const p of PROVIDERS)if(p.fields.some(f=>cfg[f.k])){const el=document.getElementById('pc-'+p.id);if(el)el.style.borderColor='#10b981';}
+}
+async function openP(id){
+  const p=PROVIDERS.find(x=>x.id===id);if(!p)return;_ap=id;
+  document.querySelectorAll('.pc').forEach(c=>c.classList.remove('active'));
+  document.getElementById('pc-'+id)?.classList.add('active');
+  document.getElementById('pf-title').textContent=p.name+' Settings';
+  const cfg=await getCfg();
+  document.getElementById('pf-fields').innerHTML=p.fields.map(f=>`<div class="fg"><label>${f.l}</label><input type="${f.t}" id="pf-${f.k}" placeholder="${f.p}" value="${cfg[f.k]||''}"></div>`).join('');
+  const pf=document.getElementById('pform');pf.classList.add('show');pf.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+async function saveProvider(){
+  const p=PROVIDERS.find(x=>x.id===_ap);if(!p)return;
+  const patch={};
+  for(const f of p.fields){const v=document.getElementById('pf-'+f.k)?.value||'';if(v)patch[f.k]=v;}
+  await patchCfg(patch);toast('Provider saved');closeProvider();loadProviders();
+}
+function closeProvider(){document.getElementById('pform').classList.remove('show');document.querySelectorAll('.pc').forEach(c=>c.classList.remove('active'));_ap=null;}
+
+// Channels
+const CHANNELS=[
+ {id:'telegram',icon:'&#x2708;',name:'Telegram',fields:[{k:'telegram_token',l:'Bot Token',t:'password',p:'123456:ABC...'}]},
+ {id:'discord',icon:'&#x1F3AE;',name:'Discord',fields:[{k:'discord_token',l:'Bot Token',t:'password',p:'MTk...'}]},
+ {id:'slack',icon:'&#x1F527;',name:'Slack',fields:[{k:'slack_bot_token',l:'Bot Token',t:'password',p:'xoxb-...'},{k:'slack_app_token',l:'App Token',t:'password',p:'xapp-...'}]},
+ {id:'whatsapp',icon:'&#x1F4F1;',name:'WhatsApp',fields:[{k:'whatsapp_phone_id',l:'Phone Number ID',t:'text',p:'123456789'},{k:'whatsapp_token',l:'Access Token',t:'password',p:'EAABs...'},{k:'whatsapp_verify_token',l:'Verify Token',t:'text',p:'my_token'}]},
+ {id:'lark',icon:'&#x1F985;',name:'Lark/Feishu',fields:[{k:'lark_app_id',l:'App ID',t:'text',p:'cli_...'},{k:'lark_app_secret',l:'App Secret',t:'password',p:'...'}]},
+ {id:'dingtalk',icon:'&#x1F514;',name:'DingTalk',fields:[{k:'dingtalk_access_token',l:'Access Token',t:'password',p:'...'},{k:'dingtalk_secret',l:'Secret',t:'password',p:'...'}]},
+ {id:'wechat',icon:'&#x1F4AC;',name:'WeChat Work',fields:[{k:'wechat_corp_id',l:'Corp ID',t:'text',p:'wx...'},{k:'wechat_agent_id',l:'Agent ID',t:'text',p:'1000001'},{k:'wechat_secret',l:'Secret',t:'password',p:'...'}]},
+ {id:'matrix',icon:'&#x1F310;',name:'Matrix',fields:[{k:'matrix_homeserver',l:'Homeserver',t:'text',p:'https://matrix.org'},{k:'matrix_user',l:'User ID',t:'text',p:'@bot:matrix.org'},{k:'matrix_password',l:'Password',t:'password',p:'...'},{k:'matrix_access_token',l:'Access Token',t:'password',p:'syt_...'}]},
+ {id:'irc',icon:'&#x1F4BB;',name:'IRC',fields:[{k:'irc_server',l:'Server',t:'text',p:'irc.libera.chat'},{k:'irc_port',l:'Port',t:'text',p:'6697'},{k:'irc_nick',l:'Nick',t:'text',p:'mynanobot'},{k:'irc_channel',l:'Channel',t:'text',p:'#mychan'},{k:'irc_password',l:'Password',t:'password',p:'...'}]},
+];
+let _ac=null;
+async function loadChannels(){
+  const cfg=await getCfg();
+  document.getElementById('cgrid').innerHTML=CHANNELS.map(c=>`
+   <div class="cc" id="cc-${c.id}" onclick="openCh('${c.id}')">
+    <span class="ci">${c.icon}</span><span class="cn">${c.name}</span>
+   </div>`).join('');
+  for(const c of CHANNELS)if(c.fields.some(f=>cfg[f.k])){const el=document.getElementById('cc-'+c.id);if(el)el.style.borderColor='#10b981';}
+}
+async function openCh(id){
+  const c=CHANNELS.find(x=>x.id===id);if(!c)return;_ac=id;
+  document.querySelectorAll('.cc').forEach(e=>e.classList.remove('active'));
+  document.getElementById('cc-'+id)?.classList.add('active');
+  document.getElementById('cf-title').textContent=c.name+' Configuration';
+  const cfg=await getCfg();
+  document.getElementById('cf-fields').innerHTML=c.fields.map(f=>`<div class="fg"><label>${f.l}</label><input type="${f.t}" id="cf-${f.k}" placeholder="${f.p}" value="${cfg[f.k]||''}"></div>`).join('');
+  const cf=document.getElementById('cform');cf.classList.add('show');cf.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+async function saveCh(){
+  const c=CHANNELS.find(x=>x.id===_ac);if(!c)return;
+  const patch={};
+  for(const f of c.fields){const v=document.getElementById('cf-'+f.k)?.value||'';if(v)patch[f.k]=v;}
+  await patchCfg(patch);toast('Channel saved');closeCh();loadChannels();
+}
+function closeCh(){document.getElementById('cform').classList.remove('show');document.querySelectorAll('.cc').forEach(e=>e.classList.remove('active'));_ac=null;}
+
+// Skills
+let _editSk=null;
+async function loadSkills(){
+  const r=await fetch('/api/skills').then(x=>x.json()).catch(()=>({skills:[]}));
+  const g=document.getElementById('sgrid');
+  g.innerHTML=r.skills.length?r.skills.map(s=>`<div class="sk" onclick="editSk('${s.name}')">&#x1F4C4; ${s.name}</div>`).join(''):'<em style="color:#9ca3af">No skills yet</em>';
+}
+function newSkill(){_editSk=null;document.getElementById('sk-name').value='';document.getElementById('sk-content').value='';const e=document.getElementById('seditor');e.classList.add('show');e.scrollIntoView({behavior:'smooth',block:'nearest'});}
+async function editSk(name){
+  const r=await fetch('/api/skills/'+name).then(x=>x.json()).catch(()=>null);
+  if(!r)return toast('Load failed','err');
+  _editSk=name;document.getElementById('sk-name').value=name;document.getElementById('sk-content').value=r.content;
+  const e=document.getElementById('seditor');e.classList.add('show');e.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+async function saveSkill(){
+  const name=document.getElementById('sk-name').value.trim();
+  if(!name)return toast('Name required','err');
+  await fetch('/api/skills/'+name,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:document.getElementById('sk-content').value})});
+  toast('Skill saved');closeSk();loadSkills();
+}
+async function delSkill(){
+  const name=document.getElementById('sk-name').value.trim();
+  if(!name||!confirm('Delete "'+name+'"?'))return;
+  await fetch('/api/skills/'+name,{method:'DELETE'});
+  toast('Deleted');closeSk();loadSkills();
+}
+function closeSk(){document.getElementById('seditor').classList.remove('show');}
+
+// Memory
+async function loadMemory(){const r=await fetch('/api/memory').then(x=>x.json()).catch(()=>({content:''}));document.getElementById('mem').value=r.content;}
+async function saveMem(){await fetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:document.getElementById('mem').value})});toast('Memory saved');}
+
+// MCP
+async function loadMcp(){
+  const cfg=await getCfg();const servers=cfg.mcp_servers||[];
+  document.getElementById('mlist').innerHTML=servers.length?servers.map((s,i)=>`
+   <div class="mitem">
+    <div><div class="mn">${s.name||'Server'+i}</div><div class="mu">${s.type==='sse'?(s.url||''):(s.command||'')+(s.args?' '+s.args.join(' '):'')}</div></div>
+    <button class="btn bd btn-sm" onclick="rmMcp(${i})">Remove</button>
+   </div>`).join(''):'<div style="color:#9ca3af;font-size:.88em;padding:4px">No MCP servers configured</div>';
+}
+function mcpType(){const t=document.getElementById('mcp-type').value;document.getElementById('mcp-sse').style.display=t==='sse'?'block':'none';document.getElementById('mcp-stdio').style.display=t==='stdio'?'block':'none';}
+async function addMcp(){
+  const name=document.getElementById('mcp-name').value.trim();
+  const type=document.getElementById('mcp-type').value;
+  if(!name)return toast('Name required','err');
+  const s={name,type};
+  if(type==='sse'){const url=document.getElementById('mcp-url').value.trim();if(!url)return toast('URL required','err');s.url=url;}
+  else{const cmd=document.getElementById('mcp-cmd').value.trim();if(!cmd)return toast('Command required','err');s.command=cmd;const a=document.getElementById('mcp-args').value.trim();if(a)s.args=a.split(' ').filter(Boolean);const c=document.getElementById('mcp-cwd').value.trim();if(c)s.cwd=c;}
+  const cfg=await getCfg();await patchCfg({mcp_servers:[...(cfg.mcp_servers||[]),s]});
+  ['mcp-name','mcp-url','mcp-cmd','mcp-args','mcp-cwd'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  toast('MCP server added');loadMcp();
+}
+async function rmMcp(i){const cfg=await getCfg();await patchCfg({mcp_servers:(cfg.mcp_servers||[]).filter((_,j)=>j!==i)});toast('Removed');loadMcp();}
+
+// Logs
+let _lines=[];let _aTimer=null;
+async function loadLogs(){const r=await fetch('/api/logs').then(x=>x.json()).catch(()=>({lines:[]}));_lines=r.lines||[];filterLogs();}
+function filterLogs(){const q=(document.getElementById('log-q').value||'').toLowerCase();const l=q?_lines.filter(x=>x.toLowerCase().includes(q)):_lines;const b=document.getElementById('logbox');b.textContent=l.join('\n')||'(empty)';b.scrollTop=b.scrollHeight;}
+function autoRef(){const on=document.getElementById('auto-ref').checked;clearInterval(_aTimer);if(on)_aTimer=setInterval(loadLogs,3000);}
+async function clearLogs(){if(!confirm('Clear all logs?'))return;await fetch('/api/logs',{method:'DELETE'});_lines=[];filterLogs();toast('Logs cleared');}
+
+// Init
+loadStatus();
+setInterval(loadStatus,8000);
 </script>
 </body>
 </html>"""
 
 
 @app.get("/", response_class=HTMLResponse)
-async def root(_=Depends(check_auth)):
-    return HTML
+async def index(_=Depends(check_auth)):
+    return HTMLResponse(content=HTML)
