@@ -318,6 +318,39 @@ def _make_provider(config: Config):
 
 
 # ============================================================================
+# Web Dashboard
+# ============================================================================
+
+
+@app.command()
+def web(
+    port: int = typer.Option(1890, "--port", "-p", help="Web dashboard port"),
+    host: str = typer.Option("0.0.0.0", "--host", "-H", help="Host to bind to"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """Start the web dashboard for browser-based configuration and chat."""
+    from nanobot.config.loader import get_config_path
+
+    if verbose:
+        import logging
+        logging.basicConfig(level=logging.DEBUG)
+
+    config_path = get_config_path()
+    if not config_path.exists():
+        console.print("[yellow]No config found. Running onboard first...[/yellow]")
+        onboard()
+
+    console.print(f"{__logo__} Starting nanobot web dashboard...")
+    console.print(f"  Dashboard: [cyan]http://{host if host != '0.0.0.0' else 'localhost'}:{port}[/cyan]")
+    console.print(f"  API:       [cyan]http://{host if host != '0.0.0.0' else 'localhost'}:{port}/api/config[/cyan]")
+    console.print(f"  WebSocket: [cyan]ws://{host if host != '0.0.0.0' else 'localhost'}:{port}/ws/chat[/cyan]")
+    console.print()
+
+    from nanobot.web.server import run_server
+    run_server(host=host, port=port)
+
+
+# ============================================================================
 # Gateway / Server
 # ============================================================================
 
