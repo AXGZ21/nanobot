@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import shlex
 import subprocess
 import threading
 from collections import deque
@@ -28,8 +29,11 @@ ADMIN_USER = os.environ.get("WEBUI_USER", "admin")
 ADMIN_PASS = os.environ.get("WEBUI_PASS") or os.environ.get("WEBUI_PASSWORD", "nanobot123")
 
 LOG_LINES = deque(maxlen=int(os.environ.get("WEBUI_LOG_LINES", "3000")))
+COMMAND_LOG_LINES = deque(maxlen=int(os.environ.get("WEBUI_COMMAND_LOG_LINES", "3000")))
 PROC_LOCK = threading.Lock()
 GATEWAY_PROC: subprocess.Popen[str] | None = None
+COMMAND_PROC: subprocess.Popen[str] | None = None
+COMMAND_TEXT: str = ""
 
 
 def _bool(value: str | None) -> bool:
@@ -58,7 +62,7 @@ def _set_nested(data: dict[str, Any], path: list[str], value: Any) -> None:
     cursor[path[-1]] = value
 
 
-def _reader_thread(proc: subprocess.Popen[str]) -> None:
+def _gateway_reader_thread(proc: subprocess.Popen[str]) -> None:
     try:
         if not proc.stdout:
             return
@@ -69,6 +73,24 @@ def _reader_thread(proc: subprocess.Popen[str]) -> None:
     finally:
         code = proc.poll()
         LOG_LINES.append(f"[gateway exited] code={code}")
+
+
+def _command_reader_thread(proc: subprocess.Popen[str]) -> None:
+    global COMMAND_PROC, COMMAND_TEXT
+    try:
+        if not proc.stdout:
+            return
+        for line in iter(proc.stdout.readline, ""):
+            text = line.rstrip()
+            if text:
+                COMMAND_LOG_LINES.append(text)
+    finally:
+        code = proc.poll()
+        COMMAND_LOG_LINES.append(f"[command exited] code={code}")
+        with PROC_LOCK:
+            if COMMAND_PROC is proc:
+                COMMAND_PROC = None
+                COMMAND_TEXT = ""
 
 
 def _gateway_running() -> bool:
@@ -93,7 +115,7 @@ def _start_gateway() -> dict[str, Any]:
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
             cwd=str(Path.home() / ".nanobot"),
         )
-        thread = threading.Thread(target=_reader_thread, args=(GATEWAY_PROC,), daemon=True)
+        thread = threading.Thread(target=_gateway_reader_thread, args=(GATEWAY_PROC,), daemon=True)
         thread.start()
         return {"ok": True, "pid": GATEWAY_PROC.pid}
 
@@ -115,6 +137,85 @@ def _stop_gateway() -> dict[str, Any]:
         GATEWAY_PROC = None
         LOG_LINES.append("[gateway stop] stopped")
         return {"ok": True}
+
+
+def _command_running() -> bool:
+    return COMMAND_PROC is not None and COMMAND_PROC.poll() is None
+
+
+def _parse_command(raw: str) -> list[str]:
+    raw = (raw or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="command is required")
+    if len(raw) > 500:
+        raise HTTPException(status_code=400, detail="command too long")
+
+    try:
+        tokens = shlex.split(raw, posix=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid command: {exc}") from exc
+
+    if not tokens:
+        raise HTTPException(status_code=400, detail="command is required")
+    if tokens[0].lower() != "nanobot":
+        raise HTTPException(status_code=400, detail="only nanobot commands are allowed")
+    return tokens
+
+
+def _start_command(raw: str) -> dict[str, Any]:
+    global COMMAND_PROC, COMMAND_TEXT
+    tokens = _parse_command(raw)
+
+    with PROC_LOCK:
+        if _command_running():
+            return {"ok": False, "message": "command already running", "pid": COMMAND_PROC.pid}
+
+        COMMAND_TEXT = " ".join(tokens)
+        COMMAND_LOG_LINES.append(f"[command start] {COMMAND_TEXT}")
+        COMMAND_PROC = subprocess.Popen(
+            tokens,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            cwd=str(Path.home() / ".nanobot"),
+        )
+        thread = threading.Thread(target=_command_reader_thread, args=(COMMAND_PROC,), daemon=True)
+        thread.start()
+        return {"ok": True, "pid": COMMAND_PROC.pid, "command": COMMAND_TEXT}
+
+
+def _stop_command() -> dict[str, Any]:
+    global COMMAND_PROC, COMMAND_TEXT
+    with PROC_LOCK:
+        if not _command_running():
+            return {"ok": True, "message": "already stopped"}
+
+        assert COMMAND_PROC is not None
+        proc = COMMAND_PROC
+        proc.terminate()
+        try:
+            proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=4)
+        COMMAND_PROC = None
+        COMMAND_TEXT = ""
+        COMMAND_LOG_LINES.append("[command stop] stopped")
+        return {"ok": True}
+
+
+def _send_command_input(text: str) -> dict[str, bool]:
+    with PROC_LOCK:
+        if not _command_running():
+            raise HTTPException(status_code=400, detail="no running command")
+        assert COMMAND_PROC is not None and COMMAND_PROC.stdin is not None
+        COMMAND_PROC.stdin.write(text + "\n")
+        COMMAND_PROC.stdin.flush()
+    COMMAND_LOG_LINES.append(f"[input] {text}")
+    return {"ok": True}
 
 
 def _bootstrap_config() -> Config:
@@ -201,6 +302,15 @@ async def meta(_: None = Depends(_require_auth)) -> dict[str, Any]:
         "configPath": str(get_config_path()),
         "workspace": str(get_workspace_path(cfg.agents.defaults.workspace)),
         "defaultUser": ADMIN_USER,
+        "quickCommands": [
+            "nanobot status",
+            "nanobot channels status",
+            "nanobot provider login openai-codex",
+            "nanobot provider login github-copilot",
+            "nanobot channels login",
+            "nanobot onboard",
+            "nanobot cron list",
+        ],
     }
 
 
@@ -249,3 +359,41 @@ async def logs(limit: int = 400, _: None = Depends(_require_auth)) -> dict[str, 
     if limit > 2000:
         limit = 2000
     return {"lines": list(LOG_LINES)[-limit:]}
+
+
+@app.get("/api/command/status")
+async def command_status(_: None = Depends(_require_auth)) -> dict[str, Any]:
+    running = _command_running()
+    return {
+        "running": running,
+        "pid": COMMAND_PROC.pid if running and COMMAND_PROC else None,
+        "command": COMMAND_TEXT,
+    }
+
+
+@app.get("/api/command/logs")
+async def command_logs(limit: int = 400, _: None = Depends(_require_auth)) -> dict[str, Any]:
+    if limit < 1:
+        limit = 1
+    if limit > 2000:
+        limit = 2000
+    return {"lines": list(COMMAND_LOG_LINES)[-limit:]}
+
+
+@app.post("/api/command/run")
+async def command_run(request: Request, _: None = Depends(_require_auth)) -> dict[str, Any]:
+    payload = await request.json()
+    cmd = str(payload.get("command", ""))
+    return _start_command(cmd)
+
+
+@app.post("/api/command/stop")
+async def command_stop(_: None = Depends(_require_auth)) -> dict[str, Any]:
+    return _stop_command()
+
+
+@app.post("/api/command/input")
+async def command_input(request: Request, _: None = Depends(_require_auth)) -> dict[str, bool]:
+    payload = await request.json()
+    text = str(payload.get("text", ""))
+    return _send_command_input(text)

@@ -207,6 +207,32 @@
       padding: 10px;
       border: 1px solid #3f4c61;
     }
+    #cmdBox {
+      min-height: 320px;
+      max-height: 50vh;
+      overflow: auto;
+      white-space: pre-wrap;
+      line-height: 1.35;
+      font-family: "IBM Plex Mono", monospace;
+      background: #0f141d;
+      color: #b8e9ff;
+      border-radius: 10px;
+      padding: 10px;
+      border: 1px solid #33465e;
+    }
+    .inline-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    #cmdStatusText {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 10px;
+      word-break: break-word;
+    }
     @media (max-width: 980px) {
       .layout { grid-template-columns: 1fr; }
       nav { border-right: 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 6px; }
@@ -299,6 +325,30 @@
         </div>
       </section>
 
+      <section id="panel-cli" class="panel">
+        <div class="card">
+          <h2 class="title">CLI Ops (Upstream Features)</h2>
+          <p class="subtitle">Run upstream nanobot commands like provider OAuth login and channels login. Interactive prompts are supported via stdin input below.</p>
+          <div class="actions" id="quickCmds"></div>
+          <div class="inline-row">
+            <input id="cmdInput" type="text" value="nanobot status" />
+            <button class="btn" onclick="runCommand()">Run</button>
+          </div>
+          <div class="inline-row">
+            <input id="cmdStdin" type="text" placeholder="Input for running command (press Send Input)" />
+            <button class="btn ghost" onclick="sendCommandInput()">Send Input</button>
+          </div>
+          <div class="actions">
+            <button class="btn ghost" onclick="refreshCommandStatus()">Refresh Status</button>
+            <button class="btn ghost" onclick="loadCommandLogs()">Refresh Logs</button>
+            <button class="btn ghost" onclick="toggleAutoCommandLogs()" id="cmdAutoBtn">Auto: Off</button>
+            <button class="btn warn" onclick="stopCommand()">Stop Command</button>
+          </div>
+          <div id="cmdStatusText">No command running.</div>
+          <div id="cmdBox">(no command output)</div>
+        </div>
+      </section>
+
       <section id="panel-logs" class="panel">
         <div class="card">
           <h2 class="title">Runtime Logs</h2>
@@ -318,9 +368,11 @@
       cfg: {},
       meta: {},
       logs: [],
+      commandLogs: [],
       active: "overview",
       dirty: false,
-      autoLogs: null
+      autoLogs: null,
+      autoCmdLogs: null
     };
 
     const tabs = [
@@ -331,6 +383,7 @@
       ["tools", "Tools"],
       ["gateway", "Gateway"],
       ["json", "Advanced JSON"],
+      ["cli", "CLI Ops"],
       ["logs", "Runtime Logs"]
     ];
 
@@ -391,6 +444,10 @@
       renderTabs();
       renderAllSections();
       if (id === "logs") loadLogs();
+      if (id === "cli") {
+        refreshCommandStatus();
+        loadCommandLogs();
+      }
     }
 
     function createField(path, key, value) {
@@ -530,6 +587,22 @@
       document.getElementById("metaProvider").textContent = state.cfg?.agents?.defaults?.provider || "";
     }
 
+    function renderQuickCommands() {
+      const holder = document.getElementById("quickCmds");
+      holder.innerHTML = "";
+      const commands = state.meta.quickCommands || [];
+      commands.forEach((cmd) => {
+        const btn = document.createElement("button");
+        btn.className = "btn ghost slim";
+        btn.textContent = cmd;
+        btn.onclick = () => {
+          document.getElementById("cmdInput").value = cmd;
+          runCommand();
+        };
+        holder.appendChild(btn);
+      });
+    }
+
     function renderAllSections() {
       renderOverview();
       renderSection("providers", ["providers"], "providersBody");
@@ -593,6 +666,88 @@
       document.getElementById("autoBtn").textContent = "Auto: On";
     }
 
+    async function refreshCommandStatus() {
+      try {
+        const data = await api("/api/command/status");
+        const text = data.running
+          ? `Running (PID ${data.pid}) -> ${data.command || ""}`
+          : "No command running.";
+        document.getElementById("cmdStatusText").textContent = text;
+      } catch (err) {
+        document.getElementById("cmdStatusText").textContent = `Failed to load command status: ${err.message}`;
+      }
+    }
+
+    async function loadCommandLogs() {
+      try {
+        const data = await api("/api/command/logs?limit=500");
+        state.commandLogs = data.lines || [];
+        const box = document.getElementById("cmdBox");
+        box.textContent = state.commandLogs.length ? state.commandLogs.join("\n") : "(no command output)";
+        box.scrollTop = box.scrollHeight;
+      } catch (err) {
+        document.getElementById("cmdBox").textContent = `Failed to load command logs: ${err.message}`;
+      }
+    }
+
+    async function runCommand() {
+      const cmd = document.getElementById("cmdInput").value.trim();
+      if (!cmd) return;
+      try {
+        await api("/api/command/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command: cmd })
+        });
+        await refreshCommandStatus();
+        await loadCommandLogs();
+      } catch (err) {
+        alert(`Command failed to start: ${err.message}`);
+      }
+    }
+
+    async function stopCommand() {
+      try {
+        await api("/api/command/stop", { method: "POST" });
+        await refreshCommandStatus();
+        await loadCommandLogs();
+      } catch (err) {
+        alert(`Stop failed: ${err.message}`);
+      }
+    }
+
+    async function sendCommandInput() {
+      const text = document.getElementById("cmdStdin").value;
+      if (!text.trim()) return;
+      try {
+        await api("/api/command/input", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text })
+        });
+        document.getElementById("cmdStdin").value = "";
+        await loadCommandLogs();
+      } catch (err) {
+        alert(`Input failed: ${err.message}`);
+      }
+    }
+
+    function toggleAutoCommandLogs() {
+      if (state.autoCmdLogs) {
+        clearInterval(state.autoCmdLogs);
+        state.autoCmdLogs = null;
+        document.getElementById("cmdAutoBtn").textContent = "Auto: Off";
+        return;
+      }
+      loadCommandLogs();
+      refreshCommandStatus();
+      state.autoCmdLogs = setInterval(() => {
+        loadCommandLogs();
+        refreshCommandStatus();
+      }, 3000);
+      document.getElementById("cmdAutoBtn").textContent = "Auto: On";
+    }
+
     async function saveConfig() {
       try {
         await api("/api/config", {
@@ -645,9 +800,11 @@
     async function init() {
       renderTabs();
       state.meta = await api("/api/meta");
+      renderQuickCommands();
       state.cfg = await api("/api/config");
       renderAllSections();
       await refreshStatus();
+      await refreshCommandStatus();
       setInterval(refreshStatus, 8000);
       switchTab("overview");
     }
