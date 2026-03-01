@@ -160,7 +160,7 @@
       color: #8d97a5;
       margin-top: 4px;
     }
-    input[type="text"], input[type="password"], input[type="number"], textarea {
+    input[type="text"], input[type="password"], input[type="number"], textarea, select {
       width: 100%;
       border: 1px solid #cfd7e2;
       border-radius: 8px;
@@ -233,6 +233,31 @@
       margin-bottom: 10px;
       word-break: break-word;
     }
+    .wizard-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .wizard-field label {
+      display: block;
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .wizard-check {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 0;
+      font-size: 0.86rem;
+      color: var(--ink);
+    }
+    .wizard-divider {
+      height: 1px;
+      background: var(--line);
+      margin: 12px 0;
+    }
     @media (max-width: 980px) {
       .layout { grid-template-columns: 1fr; }
       nav { border-right: 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 6px; }
@@ -274,6 +299,87 @@
             <button class="btn warn" onclick="gateway('stop')">Stop</button>
           </div>
           <p class="subtitle">Use Runtime Logs tab for live output.</p>
+        </div>
+      </section>
+
+      <section id="panel-wizard" class="panel">
+        <div class="card">
+          <h2 class="title">Setup Wizard</h2>
+          <p class="subtitle">Guided setup for providers, model, channels, and safety defaults.</p>
+          <div class="actions">
+            <button class="btn ghost" onclick="loadWizardFromConfig()">Load From Current Config</button>
+            <button class="btn" onclick="saveWizard()">Save Wizard To Config</button>
+            <button class="btn" onclick="saveWizardAndRestart()">Save + Restart Gateway</button>
+          </div>
+
+          <div class="wizard-divider"></div>
+          <h3 class="title">1) Provider and Model</h3>
+          <div class="wizard-grid">
+            <div class="wizard-field">
+              <label>Provider</label>
+              <select id="wizProvider" onchange="onWizardProviderChange()">
+                <option value="openrouter">OpenRouter</option>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="gemini">Gemini</option>
+                <option value="groq">Groq</option>
+                <option value="custom">Custom (OpenAI-compatible)</option>
+                <option value="openai-codex">OpenAI Codex (OAuth)</option>
+                <option value="github-copilot">GitHub Copilot (OAuth)</option>
+              </select>
+            </div>
+            <div class="wizard-field">
+              <label>Model</label>
+              <input id="wizModel" type="text" placeholder="openai/gpt-4.1-mini or openai-codex/gpt-5.1-codex" />
+            </div>
+          </div>
+          <div class="wizard-grid">
+            <div class="wizard-field">
+              <label>API Key (for non-OAuth providers)</label>
+              <input id="wizApiKey" type="password" placeholder="sk-..." />
+            </div>
+            <div class="wizard-field">
+              <label>API Base (optional)</label>
+              <input id="wizApiBase" type="text" placeholder="https://api.openai.com/v1" />
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn ghost slim" onclick="runWizardCommand('nanobot provider login openai-codex')">Run OpenAI Codex Login</button>
+            <button class="btn ghost slim" onclick="runWizardCommand('nanobot provider login github-copilot')">Run GitHub Copilot Login</button>
+          </div>
+
+          <div class="wizard-divider"></div>
+          <h3 class="title">2) Channels</h3>
+          <div class="wizard-grid">
+            <div class="wizard-field">
+              <label class="wizard-check"><input id="wizTelegramEnabled" type="checkbox" />Enable Telegram</label>
+              <input id="wizTelegramToken" type="password" placeholder="Telegram Bot Token" />
+            </div>
+            <div class="wizard-field">
+              <label class="wizard-check"><input id="wizDiscordEnabled" type="checkbox" />Enable Discord</label>
+              <input id="wizDiscordToken" type="password" placeholder="Discord Bot Token" />
+            </div>
+            <div class="wizard-field">
+              <label class="wizard-check"><input id="wizSlackEnabled" type="checkbox" />Enable Slack</label>
+              <input id="wizSlackBotToken" type="password" placeholder="Slack Bot Token (xoxb-...)" />
+              <input id="wizSlackAppToken" type="password" placeholder="Slack App Token (xapp-...)" style="margin-top:6px;" />
+            </div>
+          </div>
+
+          <div class="wizard-divider"></div>
+          <h3 class="title">3) Safety and Runtime</h3>
+          <div class="wizard-grid">
+            <div class="wizard-field">
+              <label class="wizard-check"><input id="wizRestrictWorkspace" type="checkbox" />Restrict tools to workspace</label>
+              <label class="wizard-check"><input id="wizSendProgress" type="checkbox" />Send progress updates to channels</label>
+              <label class="wizard-check"><input id="wizSendToolHints" type="checkbox" />Send tool hint updates to channels</label>
+            </div>
+            <div class="wizard-field">
+              <label>Brave Search API Key (optional)</label>
+              <input id="wizBraveKey" type="password" placeholder="BSA..." />
+            </div>
+          </div>
         </div>
       </section>
 
@@ -377,6 +483,7 @@
 
     const tabs = [
       ["overview", "Overview"],
+      ["wizard", "Setup Wizard"],
       ["providers", "Providers"],
       ["channels", "Channels"],
       ["agents", "Agents"],
@@ -447,6 +554,9 @@
       if (id === "cli") {
         refreshCommandStatus();
         loadCommandLogs();
+      }
+      if (id === "wizard") {
+        loadWizardFromConfig();
       }
     }
 
@@ -601,6 +711,153 @@
         };
         holder.appendChild(btn);
       });
+    }
+
+    const WIZARD_PROVIDER_DEFAULT_MODEL = {
+      "openrouter": "openrouter/anthropic/claude-3.5-sonnet",
+      "openai": "openai/gpt-4.1-mini",
+      "anthropic": "anthropic/claude-opus-4-5",
+      "deepseek": "deepseek/deepseek-chat",
+      "gemini": "gemini/gemini-2.5-pro",
+      "groq": "groq/llama-3.3-70b-versatile",
+      "custom": "gpt-4o-mini",
+      "openai-codex": "openai-codex/gpt-5.1-codex",
+      "github-copilot": "github-copilot/gpt-4o"
+    };
+
+    function wizardProviderToConfig(provider) {
+      return provider.replace(/-/g, "_");
+    }
+
+    function ensureObj(path) {
+      let cur = state.cfg;
+      for (const key of path) {
+        if (!cur[key] || typeof cur[key] !== "object") cur[key] = {};
+        cur = cur[key];
+      }
+      return cur;
+    }
+
+    function pickWizardProvider() {
+      const explicit = state.cfg?.agents?.defaults?.provider || "";
+      const model = (state.cfg?.agents?.defaults?.model || "").toLowerCase();
+      if (model.startsWith("openai-codex/") || explicit === "openai_codex") return "openai-codex";
+      if (model.startsWith("github-copilot/") || explicit === "github_copilot") return "github-copilot";
+      if (explicit && explicit !== "auto") return explicit.replace(/_/g, "-");
+
+      const providers = state.cfg?.providers || {};
+      const candidates = ["openrouter", "openai", "anthropic", "deepseek", "gemini", "groq", "custom"];
+      for (const p of candidates) {
+        if (providers?.[p]?.apiKey) return p;
+      }
+      return "openrouter";
+    }
+
+    function onWizardProviderChange() {
+      const provider = document.getElementById("wizProvider").value;
+      const isOAuth = provider === "openai-codex" || provider === "github-copilot";
+      const keyEl = document.getElementById("wizApiKey");
+      const baseEl = document.getElementById("wizApiBase");
+      keyEl.disabled = isOAuth;
+      baseEl.disabled = isOAuth;
+      if (isOAuth) {
+        keyEl.value = "";
+        baseEl.value = "";
+      }
+      const modelEl = document.getElementById("wizModel");
+      if (!modelEl.value.trim()) {
+        modelEl.value = WIZARD_PROVIDER_DEFAULT_MODEL[provider] || "";
+      }
+    }
+
+    function loadWizardFromConfig() {
+      const provider = pickWizardProvider();
+      const providerCfgKey = wizardProviderToConfig(provider);
+      const providerCfg = state.cfg?.providers?.[providerCfgKey] || {};
+
+      document.getElementById("wizProvider").value = provider;
+      document.getElementById("wizModel").value = state.cfg?.agents?.defaults?.model || "";
+      document.getElementById("wizApiKey").value = providerCfg?.apiKey || "";
+      document.getElementById("wizApiBase").value = providerCfg?.apiBase || "";
+
+      document.getElementById("wizTelegramEnabled").checked = !!state.cfg?.channels?.telegram?.enabled;
+      document.getElementById("wizTelegramToken").value = state.cfg?.channels?.telegram?.token || "";
+      document.getElementById("wizDiscordEnabled").checked = !!state.cfg?.channels?.discord?.enabled;
+      document.getElementById("wizDiscordToken").value = state.cfg?.channels?.discord?.token || "";
+      document.getElementById("wizSlackEnabled").checked = !!state.cfg?.channels?.slack?.enabled;
+      document.getElementById("wizSlackBotToken").value = state.cfg?.channels?.slack?.botToken || "";
+      document.getElementById("wizSlackAppToken").value = state.cfg?.channels?.slack?.appToken || "";
+
+      document.getElementById("wizRestrictWorkspace").checked = !!state.cfg?.tools?.restrictToWorkspace;
+      document.getElementById("wizSendProgress").checked = state.cfg?.channels?.sendProgress !== false;
+      document.getElementById("wizSendToolHints").checked = !!state.cfg?.channels?.sendToolHints;
+      document.getElementById("wizBraveKey").value = state.cfg?.tools?.web?.search?.apiKey || "";
+
+      onWizardProviderChange();
+    }
+
+    function applyWizardToState() {
+      ensureObj(["providers"]);
+      ensureObj(["channels"]);
+      ensureObj(["agents", "defaults"]);
+      ensureObj(["tools", "web", "search"]);
+
+      const provider = document.getElementById("wizProvider").value;
+      const providerCfgKey = wizardProviderToConfig(provider);
+      const modelInput = document.getElementById("wizModel").value.trim();
+      const apiKey = document.getElementById("wizApiKey").value.trim();
+      const apiBase = document.getElementById("wizApiBase").value.trim();
+
+      state.cfg.agents.defaults.model = modelInput || WIZARD_PROVIDER_DEFAULT_MODEL[provider];
+      state.cfg.agents.defaults.provider = providerCfgKey;
+
+      if (!state.cfg.providers[providerCfgKey] || typeof state.cfg.providers[providerCfgKey] !== "object") {
+        state.cfg.providers[providerCfgKey] = {};
+      }
+      if (provider !== "openai-codex" && provider !== "github-copilot") {
+        state.cfg.providers[providerCfgKey].apiKey = apiKey;
+        if (apiBase) {
+          state.cfg.providers[providerCfgKey].apiBase = apiBase;
+        } else if (state.cfg.providers[providerCfgKey].apiBase) {
+          delete state.cfg.providers[providerCfgKey].apiBase;
+        }
+      }
+
+      ensureObj(["channels", "telegram"]);
+      ensureObj(["channels", "discord"]);
+      ensureObj(["channels", "slack"]);
+      state.cfg.channels.telegram.enabled = document.getElementById("wizTelegramEnabled").checked;
+      state.cfg.channels.telegram.token = document.getElementById("wizTelegramToken").value.trim();
+      state.cfg.channels.discord.enabled = document.getElementById("wizDiscordEnabled").checked;
+      state.cfg.channels.discord.token = document.getElementById("wizDiscordToken").value.trim();
+      state.cfg.channels.slack.enabled = document.getElementById("wizSlackEnabled").checked;
+      state.cfg.channels.slack.botToken = document.getElementById("wizSlackBotToken").value.trim();
+      state.cfg.channels.slack.appToken = document.getElementById("wizSlackAppToken").value.trim();
+
+      state.cfg.tools.restrictToWorkspace = document.getElementById("wizRestrictWorkspace").checked;
+      state.cfg.channels.sendProgress = document.getElementById("wizSendProgress").checked;
+      state.cfg.channels.sendToolHints = document.getElementById("wizSendToolHints").checked;
+      state.cfg.tools.web.search.apiKey = document.getElementById("wizBraveKey").value.trim();
+
+      markDirty();
+      renderAllSections();
+    }
+
+    async function saveWizard() {
+      applyWizardToState();
+      await saveConfig();
+    }
+
+    async function saveWizardAndRestart() {
+      applyWizardToState();
+      await saveConfig();
+      await gateway("restart");
+    }
+
+    async function runWizardCommand(command) {
+      document.getElementById("cmdInput").value = command;
+      switchTab("cli");
+      await runCommand();
     }
 
     function renderAllSections() {
