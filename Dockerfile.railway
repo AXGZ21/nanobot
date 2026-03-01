@@ -18,13 +18,11 @@ WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 RUN mkdir -p nanobot bridge && touch nanobot/__init__.py && \
     uv pip install --system --no-cache . && \
-    uv pip install --system --no-cache fastapi "uvicorn[standard]" && \
     rm -rf nanobot bridge
 
 # Copy and install full source.
 COPY nanobot/ nanobot/
 COPY bridge/ bridge/
-COPY webui/ webui/
 COPY start-railway.sh /app/start-railway.sh
 RUN uv pip install --system --no-cache . && \
     chmod +x /app/start-railway.sh
@@ -34,5 +32,4 @@ WORKDIR /app/bridge
 RUN npm install && npm run build
 WORKDIR /app
 
-EXPOSE 8080
 CMD ["/app/start-railway.sh"]

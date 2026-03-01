@@ -12,31 +12,19 @@
   </p>
 </div>
 
-## Railway Control Plane (This Repository)
+## Railway Headless Mode (CLI-First)
 
-This repository includes a Railway-ready web control plane for upstream nanobot.
+This repository deploys upstream nanobot in headless mode on Railway.
 
 - Runtime base: latest `HKUDS/nanobot` `main`
 - Railway build file: `Dockerfile.railway`
-- Web UI entry: `/` (Basic Auth)
-- Healthcheck: `/health`
-- Config file managed by UI: `~/.nanobot/config.json`
+- Startup command: `nanobot onboard` (if no config), then `nanobot gateway`
+- Config path: `~/.nanobot/config.json`
 
-Default web login:
+Optional config injection variables:
 
-- User: `admin` (override with `WEBUI_USER`)
-- Password: `nanobot123` (override with `WEBUI_PASS` or `WEBUI_PASSWORD`)
-
-Common Railway variables:
-
-- `OPENROUTER_API_KEY`
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `DEFAULT_MODEL`
-- `DEFAULT_PROVIDER`
-- `TELEGRAM_TOKEN`, `DISCORD_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`
-- `BRAVE_SEARCH_API_KEY`
-- `RESTRICT_TO_WORKSPACE` (`true`/`false`)
+- `NANOBOT_CONFIG_JSON` (raw JSON)
+- `NANOBOT_CONFIG_JSON_B64` (base64 encoded JSON)
 
 🐈 **nanobot** is an **ultra-lightweight** personal AI assistant inspired by [OpenClaw](https://github.com/openclaw/openclaw) 
 
