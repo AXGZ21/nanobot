@@ -26,6 +26,33 @@ Optional config injection variables:
 - `NANOBOT_CONFIG_JSON` (raw JSON)
 - `NANOBOT_CONFIG_JSON_B64` (base64 encoded JSON)
 
+Provider variables supported in headless startup:
+
+- `CUSTOM_API_KEY`, `CUSTOM_API_BASE`
+- `OPENROUTER_API_KEY`, `OPENROUTER_API_BASE`
+- `OPENAI_API_KEY`, `OPENAI_API_BASE`
+- `ANTHROPIC_API_KEY`, `ANTHROPIC_API_BASE`
+- `DEEPSEEK_API_KEY`, `DEEPSEEK_API_BASE`
+- `GROQ_API_KEY`, `GROQ_API_BASE`
+- `ZHIPU_API_KEY`, `ZHIPU_API_BASE`
+- `DASHSCOPE_API_KEY`, `DASHSCOPE_API_BASE`
+- `VLLM_API_KEY`, `VLLM_API_BASE`
+- `GEMINI_API_KEY`, `GEMINI_API_BASE`
+- `MOONSHOT_API_KEY`, `MOONSHOT_API_BASE`
+- `MINIMAX_API_KEY`, `MINIMAX_API_BASE`
+- `AIHUBMIX_API_KEY`, `AIHUBMIX_API_BASE`
+- `SILICONFLOW_API_KEY`, `SILICONFLOW_API_BASE`
+- `VOLCENGINE_API_KEY`, `VOLCENGINE_API_BASE`
+- `OPENAI_CODEX_API_KEY`, `OPENAI_CODEX_API_BASE`
+- `GITHUB_COPILOT_API_KEY`, `GITHUB_COPILOT_API_BASE`
+
+Other useful variables:
+
+- `DEFAULT_MODEL`, `DEFAULT_PROVIDER`
+- `BRAVE_SEARCH_API_KEY`
+- `TELEGRAM_TOKEN`, `DISCORD_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`
+- `RESTRICT_TO_WORKSPACE`
+
 🐈 **nanobot** is an **ultra-lightweight** personal AI assistant inspired by [OpenClaw](https://github.com/openclaw/openclaw) 
 
 ⚡️ Delivers core agent functionality in just **~4,000** lines of code — **99% smaller** than Clawdbot's 430k+ lines.
